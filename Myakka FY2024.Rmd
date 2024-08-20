@@ -1,0 +1,383 @@
+--
+title: "Myakka extrapolation"
+author: "Sophie McKee"
+date: "2024-07-01"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+# Clean existing variables
+rm(list = ls(all.names = TRUE))
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+
+```
+
+## Myakka - data upload
+
+```{r upload data, warning=FALSE}
+library(readxl)
+setwd("~/Library/CloudStorage/OneDrive-USDA/Documents/USACE FY24 - 25/Myakka/DataAnalysis")
+# input damage data
+data <- read_excel("MRSP_Tidy_Field_RS_Master.xlsx") %>%
+    mutate(Severity = case_when(Severity == 'na' ~ NA,
+                           TRUE ~ Severity)) %>% 
+    mutate(Age = case_when(Age == 'na' ~ NA,
+                           TRUE ~ Age)) %>%
+    mutate(Wetland_ATTRIBUTE = case_when(Wetland_ATTRIBUTE == 'na' ~ NA,
+                           TRUE ~ Wetland_ATTRIBUTE)) %>%
+    mutate(WETLAND_TY = case_when(WETLAND_TY == 'na' ~ NA,
+                           TRUE ~ WETLAND_TY)) %>%
+    mutate(Wetland_ACRES = case_when(Wetland_ACRES == 'na' ~ NA,
+                           TRUE ~ Wetland_ACRES)) %>% 
+    mutate(Community_ACREAGE = case_when(Community_ACREAGE == 'na' ~ NA,
+                           TRUE ~ Community_ACREAGE)) %>% 
+    mutate(EC_TYPE = case_when(EC_TYPE == 'na' ~ NA,
+                           TRUE ~ EC_TYPE)) 
+
+table(data$WETLAND_TY)
+dataAll <- data
+# Select only wetlands
+dataW <- dataAll[!is.na(dataAll$Wetland_ATTRIBUTE),]
+
+```
+
+
+## A. Damage extrapolation circumscribed to "before"
+
+
+```{r }
+data.B <- dataAll[dataAll$Before_After_Control == "Before",]
+
+```
+
+```{r}
+# Create a dataframe "all_quadrats" recording the center of all quadrats in the transects, along with their 
+# characteristics (number of cells and successes, distance to road and water, forest type)
+all_quadrats <- data.B %>% 
+  group_by(Transect, Transect_Length_in_m, Before_After_Control, Observer) %>% 
+  # Aggregate to the left and right (Width)
+  summarise(successes = sum(Damage_Coverage), water = sum(Water_Coverage), total = n(), 
+             dist_FIRELINE_m = mean(NEAR_DIST_Fireline_meters), 
+             dist_AG_m = mean(NEAR_DIST_2021_NLCD_AG_meters), 
+             NDWI = mean(NDWI), 
+             dist_Burned_Unit_m = mean(NEAR_DIST_Burned_Unit_meters)) %>% 
+  # Aggregateby series of 4 m (Length)
+  group_by(Transect) %>% 
+  mutate(quadrat = (row_number() - 1) %/% 4) %>%     
+  group_by(Transect, Before_After_Control, quadrat) %>% 
+  summarise(successes = sum(successes), water = sum(water), total = sum(total), Transect_Length_in_m = min(Transect_Length_in_m), 
+             dist_FIRELINE_m = mean(dist_FIRELINE_m), 
+             dist_AG_m = mean(dist_AG_m), 
+             NDWI = mean(NDWI), 
+             dist_Burned_Unit_m = mean(dist_Burned_Unit_m)) %>% 
+  # Keep only complete quadrats (4m X 4m)
+  filter(total == 32) %>% 
+  # Keep only quadrats that are not covered 100% in water
+  filter(water != 32) %>% 
+  mutate(cells = total - water, failures = cells - successes) %>% 
+  select(-total, -water, -cells)
+
+# Width invariant data
+Transect_data <- data.B[data.B$Transect_Width_in_m == 1 & data.B$Transect_Left_Right == "Right", c("Transect", "Before_After_Control", "Transect_Length_in_m", "Observer", "Treatment_Non_treatment", "Wetland_ATTRIBUTE", "WETLAND_TY", "EC_TYPE", "Park_Sample_Location")]
+
+all_quadrats <- left_join(all_quadrats, Transect_data, by = c("Transect", "Transect_Length_in_m"))
+
+all_quadrats$rate <- all_quadrats$successes / (all_quadrats$successes + all_quadrats$failures)
+
+y_all <- cbind(all_quadrats$successes, all_quadrats$failures)
+
+write_csv(all_quadrats, "all_quadrats.csv")
+```
+Plotting success rate as a function of distance to water and road
+
+```{r}
+
+ggplot(all_quadrats) +
+    geom_point(aes(x = dist_Burned_Unit_m, y = rate)) +
+    theme_bw() +
+    labs(
+          x = "Distance to fire (m)",
+          y = "Damage ratio"
+      )
+
+ggplot(all_quadrats) +
+    geom_point(aes(x = dist_FIRELINE_m, y = rate)) +
+    theme_bw() +
+    labs(
+          x = "Distance to fireline (m)",
+          y = "Damage ratio"
+      )
+
+ggplot(all_quadrats) +
+    geom_point(aes(x = dist_AG_m, y = rate)) +
+    theme_bw() +
+    labs(
+          x = "Distance to ag (m)",
+          y = "Damage ratio"
+      )
+```
+
+
+
+```{r}
+
+# Fit a GAM model
+library(lme4)
+
+all_quadrats$dist_AG_100 <- all_quadrats$dist_AG_m / 100
+all_quadrats$dist_FIRELINE_100 <- all_quadrats$dist_FIRELINE_m / 100
+all_quadrats$dist_Burned_Unit_100 <- all_quadrats$dist_Burned_Unit_m / 100
+
+
+m1 <- glmer(y_all ~ dist_Burned_Unit_100 + dist_FIRELINE_100 + dist_AG_100 + Park_Sample_Location + EC_TYPE + (1|Transect) + (1|Observer), family = binomial, data = all_quadrats)
+summary(m1)
+
+summary(all_quadrats$dist_water100)
+summary(sample_quadrats$dist_water100)
+anova(m2, m3, text = "Chisq")
+
+library(sjPlot)
+tab_model(m3)
+
+
+```
+
+
+```{r}
+##########
+## Other options to be investigated next year?
+##########
+
+library(caret)
+
+#specify the cross-validation method
+ctrl <- trainControl(method = "LOOCV")
+
+#fit a regression model and use LOOCV to evaluate performance
+model <- train(y ~ x1 + x2, data = df, method = "lm", trControl = ctrl)
+
+#view summary of LOOCV               
+print(model)
+
+
+
+# STAN 
+library(rstanarm)
+bglm_1 <- stan_glm(y ~ water100 + treatment,
+                              data = sample_quadrats,
+                              family = binomial(link = "logit"), 
+                              prior = student_t(df = 7, 0, 5), 
+                              prior_intercept = student_t(df = 7, 0, 5),
+                              cores = 2, seed = 12345)
+summary(bglm_1)
+
+(bglm_2 <- update(bglm_1, formula. = . ~ . + DUST))
+
+summary(bglm_2)
+
+
+# Vegetation type, all roads, thickets, soils
+
+
+
+loo_bglm_1 <- loo(bglm_1)
+loo_bglm_2 <- loo(bglm_2)
+
+comp <- loo_compare(loo_bglm_1, loo_bglm_2)
+print(comp, digits = 2)
+```
+# Extrapolation to 2 plots
+```{r}
+# Upload grid data
+grid <- read_excel("transect_and_grid_data.xlsx", 
+    sheet = "4x4_grid_points", col_types = c("skip", 
+        "numeric", "numeric", "text", "text"))
+
+grid <- grid %>% rename(dist_to_road = distance_to_road_meters)
+grid <- grid %>% rename(dist_to_water = distance_to_water_meters)
+grid <- grid %>% rename(treatment = management)
+grid$dist_water100 <- grid$dist_to_water/100
+grid$dist_road100 <- grid$dist_to_road/100
+grid$mast <- ifelse(grid$`forest_type` %in% c("Overcup Oak/Bitter Pecan",
+                                                                    "Overcup Oak/Bitter Pecan & Nuttall Oak/American Elm/Green Ash/ Sugarberry",
+                                                                    "Overcup Oak/Bitter Pecan/Sugarberry"), 1, 0)
+
+# Model to be used
+summary(m3)
+
+# Predict to the 2 plots
+# This method works to estimate the mean of the damage ratio
+# pred <- predict(m3, newdata=grid, type = "response",re.form=NA)  # list with two elements fit and se.fit
+# pred <- predict(m3, newdata=gridT, type = "response")  # list with two elements fit and se.fit
+
+# We randomly assign a transect number to each quadrat because that's the only way to have confidence intervals
+transect_pool_nontreat <- LETTERS[1:5]
+transect_pool_treat <- LETTERS[6:10]
+
+pool_nontreat <- sample(transect_pool_nontreat, size = nrow(grid)/2, replace = TRUE)
+pool_treat <- sample(transect_pool_treat, size = nrow(grid)/2, replace = TRUE)
+
+library(merTools)
+
+gridT <- cbind(grid, transect = c(pool_treat, pool_nontreat))
+
+preds <- predictInterval(m3, newdata = gridT, type = "probability") # level = 0.8 by default
+preds <- cbind(gridT, preds)
+
+DamPercent <- preds %>% group_by(treatment) %>% 
+  summarise(mean = mean(fit),
+            low_CI = mean(lwr),
+            high_CI = mean(upr))
+DamPercent
+```
+# Number of acres of damage
+
+```{r}
+# All areas are in acres
+# Treatment area:
+areaT <- 199.86 # 80.88 ha
+waterT <- 35.3274554562 # 14.296514 ha
+roadT <- 1.716842761097904 #  6,947.816154 ha
+
+areaNT <- 200.73 # 81.23 ha
+waterNT <- 34.4680698895 # 13.948733 ha
+roadNT <- 2.51733741370503 # 10,187.30308 m2
+
+areaWT <- areaT - waterT - roadT
+areaWNT <- areaNT - waterNT - roadNT
+
+(damageT <- areaWT*DamPercent[DamPercent$treatment == "treatment",c("low_CI", "mean", "high_CI")])
+(damageNT <- areaWNT*DamPercent[DamPercent$treatment == "non-treatment",c("low_CI", "mean", "high_CI")])
+
+```
+
+
+
+## B. BACI design
+
+```{r}
+data_BACI <- dataAll
+data_BACI <- dataW
+
+# For the BACI analysis, we only keep damage which is fresh or recent
+data_BACI$Damage_Coverage[data_BACI$Age == 2] <- 0
+```
+
+
+```{r}
+BACI_quadrats <- data_BACI %>% 
+  group_by(Transect, Transect_Length_in_m, Before_After_Control, Observer) %>% 
+  # Aggregate to the left and right (Width)
+  summarise(successes = sum(Damage_Coverage), water = sum(Water_Coverage), total = n(), 
+             dist_Fireline_m = mean(NEAR_DIST_Fireline_meters), 
+             dist_AG_m = mean(NEAR_DIST_2021_NLCD_AG_meters), 
+             NDWI = mean(NDWI), 
+             dist_Burned_Unit_m = mean(NEAR_DIST_Burned_Unit_meters)) %>% 
+  # Aggregateby series of 4 m (Length)
+  group_by(Transect, Before_After_Control) %>% 
+  mutate(quadrat = (row_number() - 1) %/% 4) %>%     
+  group_by(Transect, Before_After_Control, quadrat) %>% 
+  summarise(successes = sum(successes), water = sum(water), total = sum(total), Transect_Length_in_m = min(Transect_Length_in_m), 
+             dist_Fireline_m = mean(dist_Fireline_m), 
+             dist_AG_m = mean(dist_AG_m), 
+             NDWI = mean(NDWI), 
+             dist_Burned_Unit_m = mean(dist_Burned_Unit_m)) %>% 
+  # Keep only complete quadrats (4m X 4m)
+  filter(total == 32) %>% 
+  # Keep only quadrats that are not covered 100% in water
+  filter(water != 32) %>% 
+  mutate(cells = total - water, failures = cells - successes) %>% 
+  select(-total, -water, -cells)
+
+# Width invariant data
+Transect_data <- data_BACI[data_BACI$Transect_Width_in_m == 1 & data_BACI$Transect_Left_Right == "Right", c("Transect", "Before_After_Control", "Transect_Length_in_m", "Observer", "Treatment_Non_treatment", "Wetland_ATTRIBUTE", "WETLAND_TY", "EC_TYPE")]
+
+BACI_quadrats <- left_join(BACI_quadrats, Transect_data, by = c("Transect", "Before_After_Control", "Transect_Length_in_m"))
+# Create dummy variables for pre/post and treatment/non-treatment
+BACI_quadrats$Post <- ifelse(BACI_quadrats$Before_After_Control == 'After', 1, 0)
+BACI_quadrats$Treatment <- ifelse(BACI_quadrats$Treatment_Non_treatment == 'Treatment', 1, 0)
+
+
+```
+
+```{r}
+library(lme4)
+library(modelsummary) # Table functions
+library(emmeans)
+
+# Rescale distance to fire in km
+BACI_quadrats$dist_fire_km <- BACI_quadrats$NEAR_DIST_Burned_Unit_meters/1000
+
+yBACI <- cbind(BACI_quadrats$successes, BACI_quadrats$failures)
+
+# Option 1: no transect random effect, no distance to fire
+modelBACI <- glm(yBACI ~ Post + Treatment + Post*Treatment, family = binomial, data = BACI_quadrats)
+coef(modelBACI, digits = 5)
+exp(coef(modelBACI))
+# (Intercept)           Post      Treatment Post:Treatment 
+#  0.01189622     0.21220516     0.97903910     0.25744347 
+# prob = odds / (1 + odds)
+exp(confint(modelBACI))
+# (Intercept)    0.01119624 0.01262512
+# Post           0.18454333 0.24306235
+# Treatment      0.88737148 1.07934006
+# Post:Treatment 0.18526940 0.35115574
+emmeans(modelBACI, ~ Post+Treatment, type='response')  # probabilities for each p/treatment
+
+# Option 2: no transect random effect,  distance to fire
+modelBACI <- glm(yBACI ~ Post + Treatment + I(dist_fire_km^2) + dist_fire_km + Post*Treatment, family = binomial, data = BACI_quadrats)
+coef(modelBACI, digits = 5)
+exp(coef(modelBACI))
+# (Intercept)              Post         Treatment I(dist_fire_km^2)      dist_fire_km    Post:Treatment 
+#   0.0140117         0.1820976         1.2365241         1.0299188         0.8035324         0.2535229 
+# prob = odds / (1 + odds)
+exp(confint(modelBACI))
+# (Intercept)       0.01280509 0.01529942
+# Post              0.15404323 0.21403968
+# Treatment         1.08160387 1.41496266
+# I(dist_fire_km^2) 1.01802332 1.04201109
+# dist_fire_km      0.73962376 0.87251685
+# Post:Treatment    0.18039922 0.35032273
+emmeans(modelBACI, ~ Post+Treatment, type='response')  # probabilities for each p/treatment
+
+# Option 3: transect random effect
+modelBACI <- glmer(yBACI ~ Post + Treatment + Post*Treatment + (1|Transect), family = binomial, data = BACI_quadrats)
+summary(modelBACI)
+modelBACI@beta
+exp(modelBACI@beta)
+exp(confint(modelBACI))
+#                    2.5 %    97.5 %
+#.sig01         2.09848765 6.1615071
+#(Intercept)    0.01399366 0.1152396
+#Post           0.96944668 1.0644888
+#Treatment      0.14153054 2.7927431
+#Post:Treatment 0.75694484 0.8722369
+
+emmeans(modelBACI, ~ Post+Treatment, type='response')  # probabilities for each p/treatment
+tab_model(modelBACI)
+
+# Option 3: transect random effect
+modelBACI <- glmer(yBACI ~ Post + Treatment + dist_fire_km + Post*Treatment + (1|Transect), family = binomial, data = BACI_quadrats)
+summary(modelBACI)
+modelBACI@beta
+exp(modelBACI@beta)
+exp(confint(modelBACI))
+#                    2.5 %    97.5 %
+#.sig01         2.09848765 6.1615071
+#(Intercept)    0.01399366 0.1152396
+#Post           0.96944668 1.0644888
+#Treatment      0.14153054 2.7927431
+#Post:Treatment 0.75694484 0.8722369
+
+emmeans(modelBACI, ~ Post+Treatment, type='response')  # probabilities for each p/treatment
+library(sjPlot)
+tab_model(modelBACI)
+
+```
+
+## (Intercept)     sexGirl  foodBreast   foodSuppl 
+##   0.1993479   0.7315770   0.5120696   0.8415226
+The interpretation here is that odds of respiratory infection for females is 73.1% than that of a similarly feed male child and I might say that being female reduces the odds of respiratory illness by 27 %  compared to male babies.
+Chapter 11
+https://bookdown.org/dereksonderegger/571/11-binomial-regression.html#interpreting-model-coefficients
