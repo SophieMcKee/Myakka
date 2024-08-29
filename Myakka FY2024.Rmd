@@ -48,6 +48,7 @@ dataW <- dataAll[!is.na(dataAll$Wetland_ATTRIBUTE),]
 
 ```{r }
 data.B <- dataAll[dataAll$Before_After_Control == "Before",]
+data.B <- dataW[dataW$Before_After_Control == "Before",]
 
 ```
 
@@ -273,14 +274,16 @@ BACI_quadrats <- data_BACI %>%
              dist_Fireline_m = mean(NEAR_DIST_Fireline_meters), 
              dist_AG_m = mean(NEAR_DIST_2021_NLCD_AG_meters), 
              NDWI = mean(NDWI), 
-             dist_Burned_Unit_m = mean(NEAR_DIST_Burned_Unit_meters)) %>% 
-  # Aggregateby series of 4 m (Length)
+             dist_Burned_Unit_m = mean(NEAR_DIST_Burned_Unit_meters), 
+             dist_Water_m = mean(NEAR_DIST_Water_Mask_meters)) %>% 
+  # Aggregate by series of 4 m (Length)
   group_by(Transect, Before_After_Control) %>% 
   mutate(quadrat = (row_number() - 1) %/% 4) %>%     
   group_by(Transect, Before_After_Control, quadrat) %>% 
   summarise(successes = sum(successes), water = sum(water), total = sum(total), Transect_Length_in_m = min(Transect_Length_in_m), 
              dist_Fireline_m = mean(dist_Fireline_m), 
              dist_AG_m = mean(dist_AG_m), 
+             dist_Water_m = mean(dist_Water_m), 
              NDWI = mean(NDWI), 
              dist_Burned_Unit_m = mean(dist_Burned_Unit_m)) %>% 
   # Keep only complete quadrats (4m X 4m)
@@ -305,14 +308,16 @@ BACI_quadrats$Treatment <- ifelse(BACI_quadrats$Treatment_Non_treatment == 'Trea
 library(lme4)
 library(modelsummary) # Table functions
 library(emmeans)
+library(sjPlot)
 
 # Rescale distance to fire in km
-BACI_quadrats$dist_fire_km <- BACI_quadrats$NEAR_DIST_Burned_Unit_meters/1000
+BACI_quadrats$dist_fire_km <- BACI_quadrats$dist_Fireline_m/1000
 
 yBACI <- cbind(BACI_quadrats$successes, BACI_quadrats$failures)
 
 # Option 1: no transect random effect, no distance to fire
 modelBACI <- glm(yBACI ~ Post + Treatment + Post*Treatment, family = binomial, data = BACI_quadrats)
+
 coef(modelBACI, digits = 5)
 exp(coef(modelBACI))
 # (Intercept)           Post      Treatment Post:Treatment 
@@ -326,7 +331,7 @@ exp(confint(modelBACI))
 emmeans(modelBACI, ~ Post+Treatment, type='response')  # probabilities for each p/treatment
 
 # Option 2: no transect random effect,  distance to fire
-modelBACI <- glm(yBACI ~ Post + Treatment + I(dist_fire_km^2) + dist_fire_km + Post*Treatment, family = binomial, data = BACI_quadrats)
+modelBACI <- glm(yBACI ~ Post + Treatment + dist_fire_km + dist_Water_m + Post*Treatment, family = binomial, data = BACI_quadrats)
 coef(modelBACI, digits = 5)
 exp(coef(modelBACI))
 # (Intercept)              Post         Treatment I(dist_fire_km^2)      dist_fire_km    Post:Treatment 
@@ -342,7 +347,7 @@ exp(confint(modelBACI))
 emmeans(modelBACI, ~ Post+Treatment, type='response')  # probabilities for each p/treatment
 
 # Option 3: transect random effect
-modelBACI <- glmer(yBACI ~ Post + Treatment + Post*Treatment + (1|Transect), family = binomial, data = BACI_quadrats)
+modelBACI <- glmer(yBACI ~ Post + Treatment + Post*Treatment + (1|Transect) + (1|Observer), family = binomial, data = BACI_quadrats)
 summary(modelBACI)
 modelBACI@beta
 exp(modelBACI@beta)
